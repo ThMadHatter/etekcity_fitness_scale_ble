@@ -42,6 +42,7 @@ from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH
 from homeassistant.const import UnitOfMass
 from homeassistant.util.unit_conversion import MassConverter
+from homeassistant.exceptions import ConfigEntryNotReady
 
 from .const import (
     CONF_ENABLE_LIBRARY_LOGGING,
@@ -1203,6 +1204,13 @@ class ScaleDataUpdateCoordinator:
                 )
                 return  # Graceful exit, callback will retry
 
+            # If no scanner is available (because proxies haven't connected yet),
+            # raise ConfigEntryNotReady to trigger a retry later.
+            if scanner is None:
+                raise ConfigEntryNotReady(
+                    "No Bluetooth adapter or ESPHome proxy available yet"
+                )
+
             # Initialize client (always use basic client, body metrics calculated per-user)
             try:
                 _LOGGER.debug("Initializing new EtekcitySmartFitnessScale client")
@@ -1257,6 +1265,8 @@ class ScaleDataUpdateCoordinator:
                     self._client = None
                 raise
         except Exception as ex:
+            if isinstance(ex, ConfigEntryNotReady):
+                raise
             _LOGGER.exception("Failed to initialize scale client: %s", ex)
             raise
 
@@ -1304,6 +1314,15 @@ class ScaleDataUpdateCoordinator:
             try:
                 await self._async_start()
                 _LOGGER.debug("ScaleDataUpdateCoordinator started successfully")
+            except (ConfigEntryNotReady, BleakError) as ex:
+                # Swallow the error during startup race conditions to allow platform setup to finish.
+                # Schedule a retry in 10 seconds.
+                _LOGGER.warning(
+                    "Bluetooth/Proxy not ready yet (%s); retrying in 10 seconds", ex
+                )
+                self._hass.loop.call_later(
+                    10, lambda: self._hass.async_create_task(self.async_start())
+                )
             except Exception as ex:
                 _LOGGER.error(
                     "Failed to start ScaleDataUpdateCoordinator (%s: %s)",
